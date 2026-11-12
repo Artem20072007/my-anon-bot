@@ -685,11 +685,12 @@ async def buy(call: CallbackQuery):
             reply_markup=keyboard,
         )
         await call.answer()
-    except Exception as error:
-        print("Ошибка создания платежа ЮKassa:", error)
-        await call.answer("Не удалось создать платёж. Попробуй позже.", show_alert=True)
-
-
+   except Exception as error:
+    print(f"ОШИБКА ЮKASSA: {type(error).__name__}: {error!r}")
+    await call.answer(
+        "Не удалось создать платёж. Проверьте логи бота.",
+        show_alert=True
+    )
 async def activate_payment(payment_id: str):
     row = await db_execute(
         "SELECT * FROM payments WHERE telegram_charge_id=?",
