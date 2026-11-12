@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 import asyncio
-import os
 import html
+import os
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -13,15 +15,14 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    LabeledPrice,
     Message,
-    PreCheckoutQuery,
-    BotCommand,
 )
 from dotenv import load_dotenv
+from yookassa import Configuration, Payment
 
 load_dotenv()
 
@@ -33,9 +34,19 @@ ADMIN_IDS = {
 }
 DB_FILE = os.getenv("DB_FILE", "bot.sqlite3")
 RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_HOUR", "30"))
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
+RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("В файле .env не указан BOT_TOKEN")
+if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
+    raise RuntimeError("В .env не указаны YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY")
+
+Configuration.account_id = YOOKASSA_SHOP_ID
+Configuration.secret_key = YOOKASSA_SECRET_KEY
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -43,14 +54,13 @@ dp = Dispatcher()
 
 class UserStates(StatesGroup):
     waiting_question = State()
-    waiting_reply = State()
     waiting_broadcast = State()
 
 
 PLANS = {
-    "1d": {"title": "1 день", "days": 1, "stars": 99},
-    "7d": {"title": "7 дней", "days": 7, "stars": 299},
-    "30d": {"title": "1 месяц", "days": 30, "stars": 799},
+    "1d": {"title": "1 день", "days": 1, "rubles": 99},
+    "7d": {"title": "7 дней", "days": 7, "rubles": 299},
+    "30d": {"title": "30 дней", "days": 30, "rubles": 799},
 }
 
 
@@ -106,9 +116,6 @@ async def init_db():
             recipient_message_id INTEGER
         )
     """)
-    columns = await db_execute("PRAGMA table_info(messages)", fetchall=True, commit=False)
-    if "recipient_message_id" not in {r["name"] for r in columns}:
-        await db_execute("ALTER TABLE messages ADD COLUMN recipient_message_id INTEGER")
     await db_execute("""
         CREATE TABLE IF NOT EXISTS blocks (
             receiver_id INTEGER NOT NULL,
@@ -130,9 +137,22 @@ async def init_db():
             telegram_charge_id TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
             plan TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
         )
     """)
+
+    columns = await db_execute("PRAGMA table_info(messages)", fetchall=True, commit=False)
+    names = {row["name"] for row in columns}
+    if "recipient_message_id" not in names:
+        await db_execute("ALTER TABLE messages ADD COLUMN recipient_message_id INTEGER")
+
+    columns = await db_execute("PRAGMA table_info(payments)", fetchall=True, commit=False)
+    names = {row["name"] for row in columns}
+    if "status" not in names:
+        await db_execute(
+            "ALTER TABLE payments ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'"
+        )
 
 
 async def save_user(user):
@@ -147,14 +167,22 @@ async def save_user(user):
 
 
 async def get_or_create_link_code(user_id: int) -> str:
-    row = await db_execute("SELECT code FROM personal_links WHERE user_id=?", (user_id,), fetchone=True, commit=False)
+    row = await db_execute(
+        "SELECT code FROM personal_links WHERE user_id=?",
+        (user_id,), fetchone=True, commit=False,
+    )
     if row:
         return row["code"]
+
     while True:
         code = secrets.token_urlsafe(8)
-        exists = await db_execute("SELECT 1 FROM personal_links WHERE code=?", (code,), fetchone=True, commit=False)
+        exists = await db_execute(
+            "SELECT 1 FROM personal_links WHERE code=?",
+            (code,), fetchone=True, commit=False,
+        )
         if not exists:
             break
+
     await db_execute(
         "INSERT INTO personal_links(code, user_id, created_at) VALUES (?, ?, ?)",
         (code, user_id, datetime.now(timezone.utc).isoformat()),
@@ -163,12 +191,18 @@ async def get_or_create_link_code(user_id: int) -> str:
 
 
 async def user_id_by_code(code: str):
-    row = await db_execute("SELECT user_id FROM personal_links WHERE code=?", (code,), fetchone=True, commit=False)
+    row = await db_execute(
+        "SELECT user_id FROM personal_links WHERE code=?",
+        (code,), fetchone=True, commit=False,
+    )
     return row["user_id"] if row else None
 
 
 async def get_message(message_id):
-    return await db_execute("SELECT * FROM messages WHERE id=?", (message_id,), fetchone=True, commit=False)
+    return await db_execute(
+        "SELECT * FROM messages WHERE id=?",
+        (message_id,), fetchone=True, commit=False,
+    )
 
 
 async def is_blocked(receiver_id, sender_id):
@@ -180,7 +214,10 @@ async def is_blocked(receiver_id, sender_id):
 
 
 async def user_is_paid(user_id):
-    row = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (user_id,), fetchone=True, commit=False)
+    row = await db_execute(
+        "SELECT paid_until FROM users WHERE user_id=?",
+        (user_id,), fetchone=True, commit=False,
+    )
     if not row or not row["paid_until"]:
         return False
     return datetime.fromisoformat(row["paid_until"]) > datetime.now(timezone.utc)
@@ -195,7 +232,10 @@ async def get_my_blocked_users(user_id):
 
 
 async def unblock_user(receiver_id, sender_id):
-    await db_execute("DELETE FROM blocks WHERE receiver_id=? AND sender_id=?", (receiver_id, sender_id))
+    await db_execute(
+        "DELETE FROM blocks WHERE receiver_id=? AND sender_id=?",
+        (receiver_id, sender_id),
+    )
 
 
 def main_keyboard():
@@ -209,7 +249,6 @@ def main_keyboard():
 
 
 def message_keyboard(message_id):
-    # Кнопки идут вертикально: сначала «✨», ниже «Заблокировать» без смайлика.
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨", callback_data=f"who:{message_id}")],
         [InlineKeyboardButton(text="Заблокировать", callback_data=f"block:{message_id}")],
@@ -217,23 +256,17 @@ def message_keyboard(message_id):
 
 
 def blocked_user_keyboard(sender_id):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"unblock:{sender_id}")]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"unblock:{sender_id}")]
+    ])
 
 
 def prices_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 день — 99 ⭐", callback_data="buy:1d")],
-        [InlineKeyboardButton(text="7 дней — 299 ⭐", callback_data="buy:7d")],
-        [InlineKeyboardButton(text="1 месяц — 799 ⭐", callback_data="buy:30d")],
+        [InlineKeyboardButton(text="1 день — 99 ₽", callback_data="buy:1d")],
+        [InlineKeyboardButton(text="7 дней — 299 ₽", callback_data="buy:7d")],
+        [InlineKeyboardButton(text="30 дней — 799 ₽", callback_data="buy:30d")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
-    ])
-
-
-def report_keyboard(message_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚫 Спам", callback_data=f"report_reason:{message_id}:spam")],
-        [InlineKeyboardButton(text="🤬 Оскорбления", callback_data=f"report_reason:{message_id}:abuse")],
-        [InlineKeyboardButton(text="🕷 Скам / реклама", callback_data=f"report_reason:{message_id}:scam")],
     ])
 
 
@@ -248,10 +281,12 @@ def admin_keyboard():
 async def start(message: Message, state: FSMContext):
     if message.chat.type != "private":
         return
+
     await save_user(message.from_user)
     await state.clear()
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1] if len(parts) == 2 else ""
+
     if payload:
         receiver_id = await user_id_by_code(payload)
         if receiver_id is None:
@@ -263,14 +298,19 @@ async def start(message: Message, state: FSMContext):
         if await is_blocked(receiver_id, message.from_user.id):
             await message.answer("🚫 Ты заблокирован у этого пользователя.")
             return
+
         await db_execute(
             "INSERT INTO link_visits(receiver_id, visitor_id, created_at) VALUES (?, ?, ?)",
             (receiver_id, message.from_user.id, datetime.now(timezone.utc).isoformat()),
         )
         await state.set_state(UserStates.waiting_question)
         await state.update_data(receiver_id=receiver_id)
-        await message.answer("✍️ Напиши анонимное сообщение одним сообщением.\n\nПолучатель не увидит твой профиль.")
+        await message.answer(
+            "✍️ Напиши анонимное сообщение одним сообщением.\n\n"
+            "Получатель не увидит твой профиль."
+        )
         return
+
     me = await bot.get_me()
     code = await get_or_create_link_code(message.from_user.id)
     link = f"https://t.me/{me.username}?start={code}"
@@ -282,35 +322,59 @@ async def start(message: Message, state: FSMContext):
     )
 
 
-def _utc_day_start():
+def utc_day_start():
     now = datetime.now(timezone.utc)
     return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
 async def build_profile_stats(user_id: int) -> str:
-    day_start = _utc_day_start()
-    today_messages = await db_execute("SELECT COUNT(*) AS n FROM messages WHERE receiver_id=? AND created_at>=?", (user_id, day_start), fetchone=True, commit=False)
-    all_messages = await db_execute("SELECT COUNT(*) AS n FROM messages WHERE receiver_id=?", (user_id,), fetchone=True, commit=False)
-    today_visits = await db_execute("SELECT COUNT(*) AS n FROM link_visits WHERE receiver_id=? AND created_at>=?", (user_id, day_start), fetchone=True, commit=False)
-    all_visits = await db_execute("SELECT COUNT(*) AS n FROM link_visits WHERE receiver_id=?", (user_id,), fetchone=True, commit=False)
-    today_count, total_count = today_messages["n"], all_messages["n"]
-    today_level, total_level = min(10, today_count // 10), min(10, total_count // 10)
+    day_start = utc_day_start()
+    today_messages = await db_execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE receiver_id=? AND created_at>=?",
+        (user_id, day_start), fetchone=True, commit=False,
+    )
+    all_messages = await db_execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE receiver_id=?",
+        (user_id,), fetchone=True, commit=False,
+    )
+    today_visits = await db_execute(
+        "SELECT COUNT(*) AS n FROM link_visits WHERE receiver_id=? AND created_at>=?",
+        (user_id, day_start), fetchone=True, commit=False,
+    )
+    all_visits = await db_execute(
+        "SELECT COUNT(*) AS n FROM link_visits WHERE receiver_id=?",
+        (user_id,), fetchone=True, commit=False,
+    )
+
+    today_count = today_messages["n"]
+    total_count = all_messages["n"]
+    today_level = min(10, today_count // 10)
+    total_level = min(10, total_count // 10)
     me = await bot.get_me()
     code = await get_or_create_link_code(user_id)
     link = f"https://t.me/{me.username}?start={code}"
-    user = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (user_id,), fetchone=True, commit=False)
+    user = await db_execute(
+        "SELECT paid_until FROM users WHERE user_id=?",
+        (user_id,), fetchone=True, commit=False,
+    )
+
     paid_until = None
     if user and user["paid_until"]:
         parsed = datetime.fromisoformat(user["paid_until"])
         if parsed > datetime.now(timezone.utc):
             paid_until = parsed.strftime("%d.%m.%Y %H:%M UTC")
+
     subscription = f"✅ до {paid_until}" if paid_until else "❌ нет"
     return (
         "📊 <b>Статистика профиля</b>\n\n"
         "📤 <b>Сегодня:</b>\n"
-        f"💬 Сообщений: {today_count}\n👀 Переходов по ссылке: {today_visits['n']}\n👑 Популярность: {today_level}/10\n\n"
+        f"💬 Сообщений: {today_count}\n"
+        f"👀 Переходов по ссылке: {today_visits['n']}\n"
+        f"👑 Популярность: {today_level}/10\n\n"
         "📤 <b>За всё время:</b>\n"
-        f"💬 Сообщений: {total_count}\n👀 Переходов по ссылке: {all_visits['n']}\n👑 Популярность: {total_level}/10\n\n"
+        f"💬 Сообщений: {total_count}\n"
+        f"👀 Переходов по ссылке: {all_visits['n']}\n"
+        f"👑 Популярность: {total_level}/10\n\n"
         f"💎 Доступ к просмотру автора: <b>{subscription}</b>\n\n"
         "Чтобы повысить популярность, распространяй персональную ссылку:\n"
         f"👉 <code>{link}</code>\n\n"
@@ -336,9 +400,9 @@ async def help_command(message: Message):
         await message.answer(
             "❓ <b>Помощь</b>\n\n"
             "🔗 Моя ссылка — получить персональную ссылку.\n"
-            "📊 Статистика — сообщения, переходы, популярность и дата окончания подписки.\n"
+            "📊 Статистика — сообщения, переходы и подписка.\n"
             "🚫 Заблокированные — управление блокировками.\n"
-            "💎 Цены на просмотр — подписка на просмотр отправителя.\n\n"
+            "💎 Цены на просмотр — покупка доступа через ЮKassa.\n\n"
             "Открой персональную ссылку пользователя и отправь сообщение или медиа."
         )
 
@@ -348,6 +412,7 @@ async def receive_question(message: Message, state: FSMContext):
     data = await state.get_data()
     receiver_id = data.get("receiver_id")
     sender_id = message.from_user.id
+
     if not receiver_id:
         await state.clear()
         await message.answer("⚠️ Ссылка устарела. Открой её заново.")
@@ -356,33 +421,45 @@ async def receive_question(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("🚫 Ты заблокирован у этого пользователя.")
         return
+
     count = await db_execute(
         "SELECT COUNT(*) AS count FROM messages WHERE sender_id=? AND receiver_id=? AND created_at>?",
-        (sender_id, receiver_id, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()),
+        (sender_id, receiver_id,
+         (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()),
         fetchone=True, commit=False,
     )
     if count["count"] >= RATE_LIMIT:
         await state.clear()
         await message.answer("⚠️ Лимит сообщений исчерпан. Попробуй позже.")
         return
+
     text = message.text or message.caption or ""
     now = datetime.now(timezone.utc).isoformat()
     row = await db_execute(
-        "INSERT INTO messages(sender_id, receiver_id, text, telegram_message_id, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id",
+        """INSERT INTO messages
+        (sender_id, receiver_id, text, telegram_message_id, created_at)
+        VALUES (?, ?, ?, ?, ?) RETURNING id""",
         (sender_id, receiver_id, text, message.message_id, now), fetchone=True,
     )
     message_id = row["id"]
     await state.clear()
     await message.answer("✅ Сообщение отправлено анонимно!")
+
     try:
         header = "💬 <b>У тебя новое анонимное сообщение!</b>\n\n"
         footer = "\n\n↩️ <i>Свайпни для ответа.</i>"
         if message.content_type == "text":
             body = f"<blockquote>{html.escape(message.text or '')}</blockquote>"
-            sent = await bot.send_message(receiver_id, header + body + footer, reply_markup=message_keyboard(message_id))
+            sent = await bot.send_message(
+                receiver_id, header + body + footer,
+                reply_markup=message_keyboard(message_id),
+            )
         else:
             caption_text = message.caption or ""
-            body = f"<blockquote>{html.escape(caption_text)}</blockquote>" if caption_text else ""
+            body = (
+                f"<blockquote>{html.escape(caption_text)}</blockquote>"
+                if caption_text else ""
+            )
             sent = await bot.copy_message(
                 chat_id=receiver_id,
                 from_chat_id=message.chat.id,
@@ -391,8 +468,12 @@ async def receive_question(message: Message, state: FSMContext):
                 parse_mode=ParseMode.HTML,
                 reply_markup=message_keyboard(message_id),
             )
-        await db_execute("UPDATE messages SET recipient_message_id=? WHERE id=?", (sent.message_id, message_id))
-    except Exception:
+        await db_execute(
+            "UPDATE messages SET recipient_message_id=? WHERE id=?",
+            (sent.message_id, message_id),
+        )
+    except Exception as error:
+        print("Ошибка доставки сообщения:", error)
         await message.answer("⚠️ Не удалось доставить сообщение получателю.")
 
 
@@ -413,7 +494,7 @@ async def swipe_reply(message: Message):
         await db_execute("UPDATE messages SET replied=1 WHERE id=?", (row["id"],))
         await message.answer("✅ Ответ отправлен автору анонимно.")
     except Exception:
-        await message.answer("⚠️ Не удалось отправить ответ. Возможно, автор заблокировал бота.")
+        await message.answer("⚠️ Не удалось отправить ответ.")
 
 
 @dp.callback_query(F.data == "my_link")
@@ -429,14 +510,27 @@ async def my_link(call: CallbackQuery):
 async def my_blocked(call: CallbackQuery):
     blocked = await get_my_blocked_users(call.from_user.id)
     if not blocked:
-        await call.message.answer("✅ У тебя нет заблокированных пользователей.", reply_markup=main_keyboard())
+        await call.message.answer(
+            "✅ У тебя нет заблокированных пользователей.",
+            reply_markup=main_keyboard(),
+        )
         await call.answer()
         return
-    await call.message.answer(f"🚫 <b>Заблокировано пользователей: {len(blocked)}</b>\nНажми кнопку, чтобы разблокировать:")
+
+    await call.message.answer(
+        f"🚫 <b>Заблокировано пользователей: {len(blocked)}</b>\n"
+        "Нажми кнопку, чтобы разблокировать:"
+    )
     for user in blocked:
         name = html.escape(user["first_name"] or "Без имени")
-        username = f"@{html.escape(user['username'])}" if user["username"] else "не указан"
-        await call.message.answer(f"👤 <b>{name}</b>\n🔗 Username: {username}", reply_markup=blocked_user_keyboard(user["user_id"]))
+        username = (
+            f"@{html.escape(user['username'])}"
+            if user["username"] else "не указан"
+        )
+        await call.message.answer(
+            f"👤 <b>{name}</b>\n🔗 Username: {username}",
+            reply_markup=blocked_user_keyboard(user["user_id"]),
+        )
     await call.answer()
 
 
@@ -457,7 +551,11 @@ async def unblock_from_list(call: CallbackQuery):
 
 @dp.callback_query(F.data == "prices")
 async def prices(call: CallbackQuery):
-    await call.message.answer("💎 <b>Цены на просмотр автора</b>\nОплата выполняется через Telegram Stars.", reply_markup=prices_keyboard())
+    await call.message.answer(
+        "💎 <b>Цены на просмотр автора</b>\n"
+        "Оплата выполняется через ЮKassa.",
+        reply_markup=prices_keyboard(),
+    )
     await call.answer()
 
 
@@ -469,7 +567,15 @@ async def back(call: CallbackQuery):
 
 @dp.callback_query(F.data == "help")
 async def help_button(call: CallbackQuery):
-    await call.message.answer("❓ <b>Как пользоваться</b>\n\n1. Нажми «Моя ссылка».\n2. Поделись ею.\n3. Получай анонимные сообщения.\n4. Ответь свайпом по сообщению.\n5. Срок подписки отображается в статистике профиля.")
+    await call.message.answer(
+        "❓ <b>Как пользоваться</b>\n\n"
+        "1. Нажми «Моя ссылка».\n"
+        "2. Поделись ею.\n"
+        "3. Получай анонимные сообщения.\n"
+        "4. Нажми ✨ под сообщением и выбери тариф.\n"
+        "5. Оплати через ЮKassa.\n"
+        "6. После оплаты автор сообщения откроется автоматически."
+    )
     await call.answer()
 
 
@@ -484,7 +590,10 @@ async def block_author(call: CallbackQuery):
     if not row or row["receiver_id"] != call.from_user.id:
         await call.answer("Недоступно.", show_alert=True)
         return
-    await db_execute("INSERT OR IGNORE INTO blocks(receiver_id, sender_id) VALUES (?, ?)", (row["receiver_id"], row["sender_id"]))
+    await db_execute(
+        "INSERT OR IGNORE INTO blocks(receiver_id, sender_id) VALUES (?, ?)",
+        (row["receiver_id"], row["sender_id"]),
+    )
     await call.message.answer("🚫 Автор заблокирован. Управлять блокировками можно в меню.")
     await call.answer()
 
@@ -503,9 +612,20 @@ async def who_author(call: CallbackQuery):
     if not await user_is_paid(call.from_user.id):
         await call.answer("Сначала купи доступ к просмотру.", show_alert=True)
         return
-    user = await db_execute("SELECT * FROM users WHERE user_id=?", (row["sender_id"],), fetchone=True, commit=False)
-    username = f"@{html.escape(user['username'])}" if user and user["username"] else "не указан"
-    await call.message.answer(f"👤 <b>Автор сообщения</b>\nID: <code>{row['sender_id']}</code>\nUsername: {username}")
+
+    user = await db_execute(
+        "SELECT * FROM users WHERE user_id=?",
+        (row["sender_id"],), fetchone=True, commit=False,
+    )
+    username = (
+        f"@{html.escape(user['username'])}"
+        if user and user["username"] else "не указан"
+    )
+    await call.message.answer(
+        "👤 <b>Автор сообщения</b>\n"
+        f"ID: <code>{row['sender_id']}</code>\n"
+        f"Username: {username}"
+    )
     await call.answer()
 
 
@@ -516,37 +636,127 @@ async def buy(call: CallbackQuery):
     if not plan:
         await call.answer("Тариф не найден.", show_alert=True)
         return
-    await bot.send_invoice(chat_id=call.from_user.id, title=plan["title"], description=f"Доступ к просмотру авторов на {plan['days']} дн.", payload=f"sub:{key}", currency="XTR", prices=[LabeledPrice(label=plan["title"], amount=plan["stars"])])
-    await call.answer()
+
+    try:
+        idempotence_key = str(uuid.uuid4())
+        payment = await asyncio.to_thread(
+            Payment.create,
+            {
+                "amount": {
+                    "value": f"{plan['rubles']:.2f}",
+                    "currency": "RUB",
+                },
+                "capture": True,
+                "confirmation": {
+                    "type": "redirect",
+                    "return_url": RETURN_URL,
+                },
+                "description": (
+                    f"Доступ к просмотру авторов — {plan['title']}"
+                ),
+                "metadata": {
+                    "user_id": str(call.from_user.id),
+                    "plan": key,
+                },
+            },
+            idempotence_key,
+        )
+
+        await db_execute(
+            """INSERT OR IGNORE INTO payments
+            (telegram_charge_id, user_id, plan, created_at, status)
+            VALUES (?, ?, ?, ?, 'pending')""",
+            (
+                payment.id,
+                call.from_user.id,
+                key,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+        payment_url = payment.confirmation.confirmation_url
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить", url=payment_url)]
+        ])
+        await call.message.answer(
+            f"💎 Тариф: <b>{plan['title']}</b>\n"
+            f"Стоимость: <b>{plan['rubles']} ₽</b>\n\n"
+            "После оплаты доступ активируется автоматически.",
+            reply_markup=keyboard,
+        )
+        await call.answer()
+    except Exception as error:
+        print("Ошибка создания платежа ЮKassa:", error)
+        await call.answer("Не удалось создать платёж. Попробуй позже.", show_alert=True)
 
 
-@dp.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery):
-    await query.answer(ok=True)
+async def activate_payment(payment_id: str):
+    row = await db_execute(
+        "SELECT * FROM payments WHERE telegram_charge_id=?",
+        (payment_id,), fetchone=True, commit=False,
+    )
+    if not row or row["status"] == "succeeded":
+        return False
 
-
-@dp.message(F.successful_payment)
-async def successful_payment(message: Message):
-    payment = message.successful_payment
-    key = payment.invoice_payload.split(":", 1)[1] if payment.invoice_payload.startswith("sub:") else ""
-    plan = PLANS.get(key)
+    plan = PLANS.get(row["plan"])
     if not plan:
-        await message.answer("Оплата получена, но тариф не найден.")
-        return
-    charge_id = payment.telegram_payment_charge_id
-    if await db_execute("SELECT 1 FROM payments WHERE telegram_charge_id=?", (charge_id,), fetchone=True, commit=False):
-        return
-    user = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True, commit=False)
+        return False
+
+    user = await db_execute(
+        "SELECT paid_until FROM users WHERE user_id=?",
+        (row["user_id"],), fetchone=True, commit=False,
+    )
     now = datetime.now(timezone.utc)
     base = now
+
     if user and user["paid_until"]:
-        paid_until = datetime.fromisoformat(user["paid_until"])
-        if paid_until > now:
-            base = paid_until
+        old_until = datetime.fromisoformat(user["paid_until"])
+        if old_until > now:
+            base = old_until
+
     until = base + timedelta(days=plan["days"])
-    await db_execute("UPDATE users SET paid_until=? WHERE user_id=?", (until.isoformat(), message.from_user.id))
-    await db_execute("INSERT INTO payments(telegram_charge_id, user_id, plan, created_at) VALUES (?, ?, ?, ?)", (charge_id, message.from_user.id, key, now.isoformat()))
-    await message.answer(f"✅ Оплата прошла! Доступ до: <b>{until:%d.%m.%Y %H:%M UTC}</b>")
+    await db_execute(
+        "UPDATE users SET paid_until=? WHERE user_id=?",
+        (until.isoformat(), row["user_id"]),
+    )
+    await db_execute(
+        "UPDATE payments SET status='succeeded' WHERE telegram_charge_id=?",
+        (payment_id,),
+    )
+
+    try:
+        await bot.send_message(
+            row["user_id"],
+            "✅ Оплата получена!\n"
+            "Доступ к просмотру авторов активирован до:\n"
+            f"<b>{until:%d.%m.%Y %H:%M UTC}</b>",
+        )
+    except Exception as error:
+        print("Не удалось отправить уведомление об оплате:", error)
+
+    return True
+
+
+async def yookassa_webhook(request: web.Request):
+    try:
+        data = await request.json()
+        if data.get("event") != "payment.succeeded":
+            return web.json_response({"ok": True})
+
+        payment_object = data.get("object", {})
+        payment_id = payment_object.get("id")
+        if not payment_id:
+            return web.json_response({"ok": True})
+
+        payment = await asyncio.to_thread(Payment.find_one, payment_id)
+        if payment.status != "succeeded":
+            return web.json_response({"ok": True})
+
+        await activate_payment(payment_id)
+        return web.json_response({"ok": True})
+    except Exception as error:
+        print("Ошибка webhook ЮKassa:", error)
+        return web.json_response({"ok": False}, status=500)
 
 
 @dp.message(Command("admin"))
@@ -556,8 +766,12 @@ async def admin_menu(message: Message):
         return
     users = await db_execute("SELECT COUNT(*) AS n FROM users", fetchone=True, commit=False)
     messages = await db_execute("SELECT COUNT(*) AS n FROM messages", fetchone=True, commit=False)
-    reports = await db_execute("SELECT COUNT(*) AS n FROM reports", fetchone=True, commit=False)
-    await message.answer(f"🛠 <b>Админ-панель</b>\n\n👥 Пользователей: {users['n']}\n💬 Сообщений: {messages['n']}\n🚩 Жалоб: {reports['n']}", reply_markup=admin_keyboard())
+    await message.answer(
+        f"🛠 <b>Админ-панель</b>\n\n"
+        f"👥 Пользователей: {users['n']}\n"
+        f"💬 Сообщений: {messages['n']}",
+        reply_markup=admin_keyboard(),
+    )
 
 
 @dp.callback_query(F.data == "admin_broadcast")
@@ -592,7 +806,9 @@ async def admin_broadcast_send(message: Message, state: FSMContext):
         except Exception:
             failed += 1
         await asyncio.sleep(0.05)
-    await status_msg.edit_text(f"✅ Рассылка завершена. Доставлено: {sent}; не доставлено: {failed}.")
+    await status_msg.edit_text(
+        f"✅ Рассылка завершена. Доставлено: {sent}; не доставлено: {failed}."
+    )
 
 
 @dp.callback_query(F.data == "admin_sub_info")
@@ -600,7 +816,10 @@ async def admin_sub_info(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         await call.answer("⛔ Нет доступа.", show_alert=True)
         return
-    await call.message.answer("Выдать подписку: <code>/give_sub ID ДНИ</code>\nНапример: <code>/give_sub 123456789 30</code>")
+    await call.message.answer(
+        "Выдать подписку: <code>/give_sub ID ДНИ</code>\n"
+        "Например: <code>/give_sub 123456789 30</code>"
+    )
     await call.answer()
 
 
@@ -619,10 +838,15 @@ async def admin_give_sub(message: Message):
     except ValueError:
         await message.answer("ID должен быть числом, дни — положительным целым числом.")
         return
-    user = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (target_id,), fetchone=True, commit=False)
+
+    user = await db_execute(
+        "SELECT paid_until FROM users WHERE user_id=?",
+        (target_id,), fetchone=True, commit=False,
+    )
     if not user:
         await message.answer("Пользователь не найден: он должен хотя бы раз запустить бота.")
         return
+
     now = datetime.now(timezone.utc)
     base = now
     if user["paid_until"]:
@@ -630,12 +854,22 @@ async def admin_give_sub(message: Message):
         if paid_until > now:
             base = paid_until
     until = base + timedelta(days=days)
-    await db_execute("UPDATE users SET paid_until=? WHERE user_id=?", (until.isoformat(), target_id))
-    await message.answer(f"✅ Выдано {days} дн. доступа пользователю <code>{target_id}</code>, до <b>{until:%d.%m.%Y %H:%M UTC}</b>.")
+    await db_execute(
+        "UPDATE users SET paid_until=? WHERE user_id=?",
+        (until.isoformat(), target_id),
+    )
+    await message.answer(
+        f"✅ Выдано {days} дн. доступа пользователю <code>{target_id}</code>, "
+        f"до <b>{until:%d.%m.%Y %H:%M UTC}</b>."
+    )
     try:
-        await bot.send_message(target_id, f"🎁 Вам выдан доступ к просмотру автора до <b>{until:%d.%m.%Y %H:%M UTC}</b>.")
+        await bot.send_message(
+            target_id,
+            f"🎁 Вам выдан доступ к просмотру автора до "
+            f"<b>{until:%d.%m.%Y %H:%M UTC}</b>.",
+        )
     except Exception:
-        await message.answer("Не удалось доставить уведомление пользователю (возможно, он заблокировал бота). Подписка всё равно записана под его аккаунт.")
+        pass
 
 
 async def main():
@@ -646,8 +880,20 @@ async def main():
         BotCommand(command="stats", description="Статистика и подписка"),
         BotCommand(command="help", description="Помощь"),
     ])
-    print("Бот запущен")
-    await dp.start_polling(bot)
+
+    app = web.Application()
+    app.router.add_post("/yookassa/webhook", yookassa_webhook)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
+    await site.start()
+
+    print(f"Бот запущен, webhook слушает порт {WEBHOOK_PORT}")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
+        await bot.session.close()
 
 
 if __name__ == "__main__":
