@@ -32,7 +32,14 @@ ADMIN_IDS = {
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
-DB_FILE = os.getenv("DB_FILE", "bot.sqlite3")
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_FILE = os.getenv(
+    "DB_FILE",
+    os.path.join(DATA_DIR, "new_bot.sqlite3")
+)
+
 RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_HOUR", "30"))
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
