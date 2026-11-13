@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import asyncio
 import html
@@ -32,17 +33,14 @@ ADMIN_IDS = {
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
-DATA_DIR = os.getenv("DATA_DIR", "/app/data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-DB_FILE = os.getenv(
-    "DB_FILE",
-    os.path.join(DATA_DIR, "new_bot.sqlite3")
-)
-
+DB_FILE = os.getenv("DB_FILE", "bot.sqlite3")
 RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_HOUR", "30"))
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
+
+print("YOOKASSA SHOP:", repr(YOOKASSA_SHOP_ID))
+print("YOOKASSA KEY LENGTH:", len(YOOKASSA_SECRET_KEY))
+print("YOOKASSA KEY PREFIX:", YOOKASSA_SECRET_KEY[:5])
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
