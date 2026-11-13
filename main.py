@@ -2,6 +2,7 @@
 import asyncio
 import html
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -36,10 +37,6 @@ DB_FILE = os.getenv("DB_FILE", "bot.sqlite3")
 RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_HOUR", "30"))
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "").strip()
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "").strip()
-
-print("YOOKASSA SHOP:", repr(YOOKASSA_SHOP_ID))
-print("YOOKASSA KEY LENGTH:", len(YOOKASSA_SECRET_KEY))
-print("YOOKASSA KEY PREFIX:", YOOKASSA_SECRET_KEY[:5])
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
@@ -59,6 +56,7 @@ dp = Dispatcher()
 class UserStates(StatesGroup):
     waiting_question = State()
     waiting_broadcast = State()
+    waiting_payment_email = State()
 
 
 PLANS = {
@@ -634,7 +632,7 @@ async def who_author(call: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("buy:"))
-async def buy(call: CallbackQuery):
+async def buy(call: CallbackQuery, state: FSMContext):
     key = call.data.split(":", 1)[1]
     plan = PLANS.get(key)
 
@@ -642,12 +640,65 @@ async def buy(call: CallbackQuery):
         await call.answer("Тариф не найден.", show_alert=True)
         return
 
+    await state.set_state(UserStates.waiting_payment_email)
+    await state.update_data(payment_plan=key)
+    await call.message.answer(
+        f"💎 Выбран тариф: <b>{plan['title']}</b> — <b>{plan['rubles']} ₽</b>\n\n"
+        "Укажи email для отправки электронного чека ЮKassa."
+    )
+    await call.answer()
+
+
+@dp.message(UserStates.waiting_payment_email)
+async def receive_payment_email(message: Message, state: FSMContext):
+    email = (message.text or "").strip()
+
+    email_pattern = (
+        r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+    )
+    if len(email) > 254 or not re.fullmatch(email_pattern, email):
+        await message.answer(
+            "❌ Не удалось распознать email. Отправь адрес в формате name@example.com."
+        )
+        return
+
+    data = await state.get_data()
+    key = data.get("payment_plan")
+    plan = PLANS.get(key)
+    if not plan:
+        await state.clear()
+        await message.answer("Тариф не найден. Открой меню тарифов и попробуй ещё раз.")
+        return
+
+    amount_value = f"{plan['rubles']:.2f}"
+    description = f"Доступ к просмотру авторов — {plan['title']}"
+
+    receipt = {
+        "customer": {"email": email},
+        "tax_system_code": 2,  # УСН «Доходы»
+        "items": [
+            {
+                "description": description,
+                "quantity": "1.00",
+                "amount": {
+                    "value": amount_value,
+                    "currency": "RUB",
+                },
+                "vat_code": 1,  # Без НДС: освобождение от НДС
+                "payment_mode": "full_payment",
+                "payment_subject": "service",
+            }
+        ],
+    }
+
     try:
         payment = await asyncio.to_thread(
             Payment.create,
             {
                 "amount": {
-                    "value": f"{plan['rubles']:.2f}",
+                    "value": amount_value,
                     "currency": "RUB",
                 },
                 "capture": True,
@@ -655,9 +706,10 @@ async def buy(call: CallbackQuery):
                     "type": "redirect",
                     "return_url": RETURN_URL,
                 },
-                "description": f"Доступ к просмотру авторов — {plan['title']}",
+                "description": description,
+                "receipt": receipt,
                 "metadata": {
-                    "user_id": str(call.from_user.id),
+                    "user_id": str(message.from_user.id),
                     "plan": key,
                 },
             },
@@ -672,7 +724,7 @@ async def buy(call: CallbackQuery):
             """,
             (
                 payment.id,
-                call.from_user.id,
+                message.from_user.id,
                 key,
                 datetime.now(timezone.utc).isoformat(),
             ),
@@ -689,20 +741,21 @@ async def buy(call: CallbackQuery):
             ]
         )
 
-        await call.message.answer(
+        await message.answer(
             f"💎 Тариф: <b>{plan['title']}</b>\n"
-            f"Стоимость: <b>{plan['rubles']} ₽</b>\n\n"
+            f"Стоимость: <b>{plan['rubles']} ₽</b>\n"
+            f"Чек будет отправлен на: <code>{html.escape(email)}</code>\n\n"
             "После оплаты доступ активируется автоматически.",
             reply_markup=keyboard,
         )
-        await call.answer()
+        await state.clear()
 
     except Exception as error:
         print(f"ОШИБКА ЮKASSA: {type(error).__name__}: {error!r}")
-        await call.answer(
-            "Не удалось создать платёж. Проверьте логи.",
-            show_alert=True,
+        await message.answer(
+            "❌ Не удалось создать платёж. Проверь логи и попробуй позже."
         )
+        await state.clear()
 
 
 async def activate_payment(payment_id: str):
