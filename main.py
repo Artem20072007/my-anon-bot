@@ -690,18 +690,10 @@ async def unblock_from_list(call: CallbackQuery):
     await call.answer("Разблокирован!")
 
 
-# ================= НАДЕЖНЫЙ ВЫВОД ТАРИФОВ (ПОДДЕРЖКА banner.png / banner.jpg) =================
+# ================= ЛАКОНИЧНЫЙ ВЫВОД ТАРИФОВ (ТЕКСТ УБРАН, ОСТАЛАСЬ КАРТИНКА И КНОПКИ) =================
 
 async def send_tariffs_view(message: Message):
-    caption = (
-        "👑 <b>ПРЕМИУМ-ПОДПИСКА</b>\n"
-        "<i>Больше возможностей • Больше результатов</i>\n\n"
-        "⚡️ <b>Быстрый доступ</b> — мгновенное раскрытие отправителя\n"
-        "🛡 <b>Стабильная работа</b> — доступ 24/7\n"
-        "⭐ <b>Премиум функции</b> — имя, @username, ID и ссылка на диалог\n"
-        "♾ <b>Максимум возможностей</b> — раскрывай любое количество авторов!\n\n"
-        "👇 <b>Выбери свой тариф ниже:</b>"
-    )
+    caption = "👑 <b>ВЫБЕРИ СВОЙ ТАРИФ:</b>"
 
     banner_file = find_existing_banner()
     if banner_file:
@@ -715,7 +707,7 @@ async def send_tariffs_view(message: Message):
         except Exception as e:
             print(f"Ошибка отправки файла баннера {banner_file}:", e)
 
-    # Если файла с картинкой нет — показываем текст без сбоев
+    # Если файла с картинкой нет
     await message.answer(caption, reply_markup=prices_keyboard())
 
 
@@ -1231,4 +1223,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
