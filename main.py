@@ -1124,10 +1124,13 @@ async def admin_sub_info(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         return
     await call.message.answer(
-        "Команда для ручной выдачи подписки:\n"
-        "<code>/give_sub ID ДНИ</code>\n\n"
-        "Например, выдать на 30 дней:\n"
-        "<code>/give_sub 123456789 30</code>"
+        "Команды для управления подписками:\n\n"
+        "📥 <b>Выдать / продлить:</b>\n"
+        "<code>/give_sub ID ДНИ</code>\n"
+        "Пример: <code>/give_sub 123456789 30</code>\n\n"
+        "🚫 <b>Отозвать:</b>\n"
+        "<code>/revoke_sub ID</code>\n"
+        "Пример: <code>/revoke_sub 123456789</code>"
     )
     await call.answer()
 
@@ -1186,6 +1189,51 @@ async def admin_give_sub(message: Message):
         )
     except Exception:
         pass
+
+
+@dp.message(Command("revoke_sub"))
+async def admin_revoke_sub(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Формат: <code>/revoke_sub ID</code>")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+
+    user = await db_execute(
+        "SELECT paid_until FROM users WHERE user_id=?",
+        (target_id,), fetchone=True, commit=False,
+    )
+    if not user:
+        await message.answer("Пользователь не найден в базе данных.")
+        return
+
+    if not user["paid_until"]:
+        await message.answer(
+            f"ℹ️ У пользователя <code>{target_id}</code> подписка и так не активна."
+        )
+        return
+
+    await db_execute(
+        "UPDATE users SET paid_until=NULL WHERE user_id=?",
+        (target_id,),
+    )
+    await message.answer(
+        f"🚫 Подписка пользователя <code>{target_id}</code> отозвана."
+    )
+    try:
+        await bot.send_message(
+            target_id,
+            "⚠️ <b>Ваш премиум-доступ был отозван администратором.</b>",
+            reply_markup=main_keyboard(),
+        )
+    except Exception as error:
+        print(f"Не удалось уведомить {target_id} об отзыве подписки: {error}")
 
 
 # ================= ЗАПУСК =================
