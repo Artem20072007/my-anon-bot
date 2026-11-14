@@ -42,8 +42,8 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "3000"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
 
-# Картинка тарифов (встроена прямо в код!)
-BANNER_URL = "https://unlimbot.hb.ru-msk.vkcloud-storage.ru/uploads/fbe5fc67d5374d278f9cd7280ee46395fdf5497e7441a372.jpg"
+# Имя локального файла с картинкой на хостинге
+BANNER_FILENAME = "banner.jpg"
 
 MSK_TZ = timezone(timedelta(hours=3))
 
@@ -77,7 +77,6 @@ class UserStates(StatesGroup):
     waiting_broadcast = State()
 
 
-# Тарифы 1-в-1 как на картинке
 PLANS = {
     "1d": {"title": "1 день", "days": 1, "rubles": 99},
     "7d": {"title": "7 дней", "days": 7, "rubles": 299},
@@ -674,10 +673,9 @@ async def unblock_from_list(call: CallbackQuery):
     await call.answer("Разблокирован!")
 
 
-# ================= МЕНЮ ТАРИФОВ С КАРТИНКОЙ =================
+# ================= МЕНЮ ТАРИФОВ (С НАДЕЖНОЙ ОТПРАВКОЙ ФОТО) =================
 
-@dp.callback_query(F.data == "prices")
-async def prices(call: CallbackQuery):
+async def send_tariffs_menu(message: Message):
     caption = (
         "👑 <b>ПРЕМИУМ-ПОДПИСКА</b>\n"
         "<i>Больше возможностей • Больше результатов</i>\n\n"
@@ -688,17 +686,30 @@ async def prices(call: CallbackQuery):
         "👇 <b>Выбери свой тариф ниже:</b>"
     )
 
+    # Проверяем, загружен ли локальный файл banner.jpg на хостинг
+    if os.path.exists(BANNER_FILENAME):
+        try:
+            await message.answer_photo(
+                photo=FSInputFile(BANNER_FILENAME),
+                caption=caption,
+                reply_markup=prices_keyboard()
+            )
+            return
+        except Exception as e:
+            print("Ошибка отправки локального фото banner.jpg:", e)
+
+    # Если файла banner.jpg нет или ошибка — отправляем аккуратное текстовое меню
+    await message.answer(caption, reply_markup=prices_keyboard())
+
+
+@dp.callback_query(F.data == "prices")
+async def prices(call: CallbackQuery):
     try:
         await call.message.delete()
     except Exception:
         pass
 
-    # Отправляет баннер напрямую по ссылке
-    await call.message.answer_photo(
-        photo=BANNER_URL,
-        caption=caption,
-        reply_markup=prices_keyboard()
-    )
+    await send_tariffs_menu(call.message)
     await call.answer()
 
 
@@ -770,17 +781,7 @@ async def who_author(call: CallbackQuery):
 
     # Проверка наличия премиум-подписки
     if not await user_is_paid(call.from_user.id):
-        caption = (
-            "🔒 <b>Личность автора скрыта!</b>\n\n"
-            "Чтобы узнать, кто тебе пишет, подключи <b>Премиум-подписку</b>.\n"
-            "Ты сможешь раскрывать неограниченно авторов любых сообщений!\n\n"
-            "👇 <b>Выбери подходящий тариф:</b>"
-        )
-        await call.message.answer_photo(
-            photo=BANNER_URL,
-            caption=caption,
-            reply_markup=prices_keyboard()
-        )
+        await send_tariffs_menu(call.message)
         await call.answer()
         return
 
