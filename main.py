@@ -43,7 +43,16 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "3000"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
 
-BANNER_PATH = "banner.jpg"
+# Поддерживаем любые форматы баннера (png, jpg, jpeg) в корне или папке data
+BANNER_CANDIDATES = [
+    "banner.png",
+    "banner.jpg",
+    "banner.jpeg",
+    "/app/banner.png",
+    "/app/banner.jpg",
+    "/app/data/banner.png",
+    "/app/data/banner.jpg",
+]
 
 MSK_TZ = timezone(timedelta(hours=3))
 
@@ -70,6 +79,13 @@ def format_msk(dt_iso: str) -> str:
         return dt_msk.strftime("%d.%m.%Y %H:%M МСК")
     except Exception:
         return "активно"
+
+
+def find_existing_banner() -> str | None:
+    for path in BANNER_CANDIDATES:
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 class UserStates(StatesGroup):
@@ -674,7 +690,7 @@ async def unblock_from_list(call: CallbackQuery):
     await call.answer("Разблокирован!")
 
 
-# ================= НАДЕЖНЫЙ ВЫВОД ТАРИФОВ =================
+# ================= НАДЕЖНЫЙ ВЫВОД ТАРИФОВ (ПОДДЕРЖКА banner.png / banner.jpg) =================
 
 async def send_tariffs_view(message: Message):
     caption = (
@@ -687,19 +703,19 @@ async def send_tariffs_view(message: Message):
         "👇 <b>Выбери свой тариф ниже:</b>"
     )
 
-    # Пробуем локальный файл banner.jpg
-    if os.path.exists(BANNER_PATH):
+    banner_file = find_existing_banner()
+    if banner_file:
         try:
             await message.answer_photo(
-                photo=FSInputFile(BANNER_PATH),
+                photo=FSInputFile(banner_file),
                 caption=caption,
                 reply_markup=prices_keyboard()
             )
             return
         except Exception as e:
-            print("Ошибка отправки banner.jpg:", e)
+            print(f"Ошибка отправки файла баннера {banner_file}:", e)
 
-    # Если файла нет — без сбоев выводим красивый текст
+    # Если файла с картинкой нет — показываем текст без сбоев
     await message.answer(caption, reply_markup=prices_keyboard())
 
 
@@ -1215,3 +1231,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
