@@ -2,6 +2,7 @@
 import asyncio
 import html
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -42,8 +43,7 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "3000"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
 
-# Имя локального файла с картинкой на хостинге
-BANNER_FILENAME = "banner.jpg"
+BANNER_PATH = "banner.jpg"
 
 MSK_TZ = timezone(timedelta(hours=3))
 
@@ -75,6 +75,7 @@ def format_msk(dt_iso: str) -> str:
 class UserStates(StatesGroup):
     waiting_question = State()
     waiting_broadcast = State()
+    waiting_email = State()
 
 
 PLANS = {
@@ -673,9 +674,9 @@ async def unblock_from_list(call: CallbackQuery):
     await call.answer("Разблокирован!")
 
 
-# ================= МЕНЮ ТАРИФОВ (С НАДЕЖНОЙ ОТПРАВКОЙ ФОТО) =================
+# ================= НАДЕЖНЫЙ ВЫВОД ТАРИФОВ =================
 
-async def send_tariffs_menu(message: Message):
+async def send_tariffs_view(message: Message):
     caption = (
         "👑 <b>ПРЕМИУМ-ПОДПИСКА</b>\n"
         "<i>Больше возможностей • Больше результатов</i>\n\n"
@@ -686,19 +687,19 @@ async def send_tariffs_menu(message: Message):
         "👇 <b>Выбери свой тариф ниже:</b>"
     )
 
-    # Проверяем, загружен ли локальный файл banner.jpg на хостинг
-    if os.path.exists(BANNER_FILENAME):
+    # Пробуем локальный файл banner.jpg
+    if os.path.exists(BANNER_PATH):
         try:
             await message.answer_photo(
-                photo=FSInputFile(BANNER_FILENAME),
+                photo=FSInputFile(BANNER_PATH),
                 caption=caption,
                 reply_markup=prices_keyboard()
             )
             return
         except Exception as e:
-            print("Ошибка отправки локального фото banner.jpg:", e)
+            print("Ошибка отправки banner.jpg:", e)
 
-    # Если файла banner.jpg нет или ошибка — отправляем аккуратное текстовое меню
+    # Если файла нет — без сбоев выводим красивый текст
     await message.answer(caption, reply_markup=prices_keyboard())
 
 
@@ -709,7 +710,7 @@ async def prices(call: CallbackQuery):
     except Exception:
         pass
 
-    await send_tariffs_menu(call.message)
+    await send_tariffs_view(call.message)
     await call.answer()
 
 
@@ -779,34 +780,64 @@ async def who_author(call: CallbackQuery):
         await call.answer("Сообщение не найдено.", show_alert=True)
         return
 
-    # Проверка наличия премиум-подписки
     if not await user_is_paid(call.from_user.id):
-        await send_tariffs_menu(call.message)
+        await send_tariffs_view(call.message)
         await call.answer()
         return
 
-    # Подписка активна — мгновенно раскрываем
     await send_author_card(call.from_user.id, row)
     await call.answer("Личность раскрыта!")
 
 
-# ================= ОПЛАТА ВЫБРАННОГО ТАРИФА =================
+# ================= ОФОРМЛЕНИЕ ПЛАТЕЖА С ЧЕКОМ ПО 54-ФЗ =================
 
 @dp.callback_query(F.data.startswith("buy:"))
-async def buy(call: CallbackQuery):
-    await call.answer("Формируем счёт на оплату...", show_alert=False)
-
+async def buy_start(call: CallbackQuery, state: FSMContext):
     key = call.data.split(":")[1]
     plan = PLANS.get(key)
     if not plan:
         await call.answer("Тариф не найден.", show_alert=True)
         return
 
+    await state.set_state(UserStates.waiting_email)
+    await state.update_data(chosen_plan=key)
+
+    await call.message.answer(
+        f"💎 <b>Оформление подписки: {plan['title']} ({plan['rubles']} ₽)</b>\n\n"
+        "📧 <b>Напиши свой Email</b>:\n"
+        "На него ЮKassa отправит чек об оплате по 54-ФЗ."
+    )
+    await call.answer()
+
+
+@dp.message(UserStates.waiting_email)
+async def buy_receive_email(message: Message, state: FSMContext):
+    email = (message.text or "").strip()
+
+    email_pattern = (
+        r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+    )
+    if len(email) > 254 or not re.fullmatch(email_pattern, email):
+        await message.answer(
+            "❌ Неверный формат почты! Напиши корректный email, например: <code>name@mail.ru</code>"
+        )
+        return
+
+    data = await state.get_data()
+    key = data.get("chosen_plan")
+    plan = PLANS.get(key)
+    if not plan:
+        await state.clear()
+        await message.answer("Ошибка тарифа. Открой меню заново.", reply_markup=main_keyboard())
+        return
+
     amount_value = f"{plan['rubles']:.2f}"
     description = f"Премиум-подписка: {plan['title']}"
 
     receipt = {
-        "customer": {},
+        "customer": {"email": email},
         "tax_system_code": 2,  # УСН Доходы
         "items": [
             {
@@ -839,7 +870,7 @@ async def buy(call: CallbackQuery):
                 "description": description,
                 "receipt": receipt,
                 "metadata": {
-                    "user_id": str(call.from_user.id),
+                    "user_id": str(message.from_user.id),
                     "plan": key,
                 },
             },
@@ -854,7 +885,7 @@ async def buy(call: CallbackQuery):
             """,
             (
                 payment.id,
-                call.from_user.id,
+                message.from_user.id,
                 key,
                 datetime.now(timezone.utc).isoformat(),
             ),
@@ -877,21 +908,23 @@ async def buy(call: CallbackQuery):
             ]
         )
 
-        await call.message.answer(
-            f"🧾 <b>Счёт на оплату готов!</b>\n\n"
+        await message.answer(
+            f"🧾 <b>Счёт на оплату сформирован!</b>\n\n"
             f"Тариф: <b>{plan['title']}</b>\n"
-            f"Сумма к оплате: <b>{plan['rubles']} ₽</b>\n\n"
-            "<i>(Электронный чек 54-ФЗ будет отправлен на email, указанный при оплате)</i>\n\n"
+            f"Сумма: <b>{plan['rubles']} ₽</b>\n"
+            f"Чек будет выслан на: <code>{html.escape(email)}</code>\n\n"
             "После оплаты в ЮKassa нажми кнопку <b>«🔄 Я оплатил»</b> ниже.",
             reply_markup=keyboard,
         )
+        await state.clear()
 
     except Exception as error:
         print(f"ОШИБКА ЮKASSA: {type(error).__name__}: {error!r}")
-        await call.message.answer(
+        await message.answer(
             "❌ Не удалось создать счёт на оплату. Попробуй позже или напиши поддержке.",
             reply_markup=main_keyboard()
         )
+        await state.clear()
 
 
 async def activate_payment(payment_id: str):
