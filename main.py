@@ -76,6 +76,8 @@ class UserStates(StatesGroup):
     waiting_sub_action = State()
     waiting_spy_id = State()
     waiting_nuke_id = State()
+    waiting_promo_days = State()
+    waiting_promo_count = State()
 
 def format_msk(dt_iso: str) -> str:
     try:
@@ -109,6 +111,7 @@ async def init_db():
     await db_execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender_id INTEGER NOT NULL, receiver_id INTEGER NOT NULL, text TEXT, telegram_message_id INTEGER NOT NULL, created_at TEXT NOT NULL, replied INTEGER DEFAULT 0, reported INTEGER DEFAULT 0, recipient_message_id INTEGER)")
     await db_execute("CREATE TABLE IF NOT EXISTS blocks (receiver_id INTEGER NOT NULL, sender_id INTEGER NOT NULL, PRIMARY KEY(receiver_id, sender_id))")
     await db_execute("CREATE TABLE IF NOT EXISTS payments (telegram_charge_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, plan TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending')")
+    await db_execute("CREATE TABLE IF NOT EXISTS promo_codes (code TEXT PRIMARY KEY, days INTEGER NOT NULL, used INTEGER DEFAULT 0, used_by INTEGER)")
 
 async def save_user(user):
     now = datetime.now(timezone.utc).isoformat()
@@ -161,7 +164,7 @@ def main_keyboard():
 def link_keyboard(link: str):
     share_url = f"https://t.me/share/url?url={link}&text=%D0%9D%D0%B0%D0%BF%D0%B8%D1%88%D0%B8%20%D0%BC%D0%BD%D0%B5%20%D1%87%D1%82%D0%BE-%D0%BD%D0%B8%D0%B1%D1%83%D0%B4%D1%8C%20%D0%B0%D0%BD%D0%BE%D0%BD%D0%B8%D0%BC%D0%BD%D0%BE%20%F0%9F%A4%AB"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📤 Поделиться в Telegram", url=share_url)],
+        [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)],
         [InlineKeyboardButton(text="📱 Открыть меню", callback_data="open_menu")]
     ])
 
@@ -190,6 +193,7 @@ def admin_keyboard():
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"), InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_chart")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users"), InlineKeyboardButton(text="🎯 Снайперы", callback_data="admin_snipers")],
         [InlineKeyboardButton(text="💰 Топ донатеров", callback_data="admin_top_donors"), InlineKeyboardButton(text="💎 Подписки", callback_data="admin_subs")],
+        [InlineKeyboardButton(text="👑 С подпиской", callback_data="admin_active_subs")], # <--- НОВАЯ КНОПКА
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"), InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_backup")],
     ])
 
@@ -347,11 +351,11 @@ async def stats_command(message: Message):
 @dp.message(Command("help"))
 async def help_command(message: Message):
     if message.chat.type == "private":
-        await message.answer("❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Моя ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🔒 <i>Анонимность гарантирована.</i>", reply_markup=back_keyboard())
+        await message.answer("❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Моя ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🎁 <b>Есть промокод?</b> Активируй его командой:\n<code>/redeem ТВОЙ_КОД</code>\n\n🔒 <i>Анонимность гарантирована.</i>", reply_markup=back_keyboard())
 
 @dp.callback_query(F.data == "help")
 async def help_cb(call: CallbackQuery):
-    text = "❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Моя ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🔒 <i>Анонимность гарантирована.</i>"
+    text = "❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Моя ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🎁 <b>Есть промокод?</b> Активируй его командой:\n<code>/redeem ТВОЙ_КОД</code>\n\n🔒 <i>Анонимность гарантирована.</i>"
     if call.message.photo:
         try: await call.message.delete()
         except Exception: pass
@@ -596,6 +600,36 @@ async def admin_users(call: CallbackQuery):
     else: await safe_edit_text(call, text, reply_markup=admin_keyboard())
     await call.answer()
 
+# --- НОВАЯ ФУНКЦИЯ: СПИСОК С ПОДПИСКОЙ ---
+@dp.callback_query(F.data == "admin_active_subs")
+async def admin_active_subs(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS: return
+    
+    now_iso = datetime.now(timezone.utc).isoformat()
+    rows = await db_execute(
+        "SELECT user_id, username, first_name, paid_until FROM users WHERE paid_until IS NOT NULL AND paid_until > ? ORDER BY paid_until DESC LIMIT 30",
+        (now_iso,), fetchall=True, commit=False
+    )
+    
+    if not rows:
+        text = "👑 <b>АКТИВНЫЕ ПОДПИСКИ</b>\n\n😔 Пока ни у кого нет активной подписки."
+    else:
+        text = f"👑 <b>АКТИВНЫЕ ПОДПИСКИ</b> (всего: {len(rows)})\n\n"
+        for r in rows:
+            name = html.escape(r["first_name"] or "—")
+            uname = f"@{html.escape(r['username'])}" if r["username"] else "—"
+            expire_date = format_msk(r["paid_until"])
+            text += f"👤 <b>{name}</b> ({uname})\n"
+            text += f"   🆔 ID: <code>{r['user_id']}</code>\n"
+            text += f"   📅 До: <b>{expire_date}</b>\n\n"
+            
+    if call.message.photo:
+        try: await call.message.delete()
+        except Exception: pass
+        await call.message.answer(text, reply_markup=admin_keyboard())
+    else: await safe_edit_text(call, text, reply_markup=admin_keyboard())
+    await call.answer()
+
 @dp.callback_query(F.data == "admin_snipers")
 async def admin_snipers(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
@@ -782,6 +816,72 @@ async def admin_broadcast_send(message: Message, state: FSMContext):
         except Exception: failed += 1
         await asyncio.sleep(0.04)
     await status_msg.edit_text(f"📢 <b>Рассылка завершена</b>\n\n✅ Доставлено: <b>{sent}</b>\n❌ Не доставлено: <b>{failed}</b>")
+
+@dp.message(Command("promo"))
+async def admin_promo_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await state.set_state(UserStates.waiting_promo_days)
+    await message.answer("🎁 <b>Генератор промокодов</b>\n\nВведи, на сколько <b>дней</b> подписки будет действовать код:", reply_markup=admin_cancel_keyboard())
+
+@dp.message(UserStates.waiting_promo_days)
+async def admin_promo_days(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return await state.clear()
+    try:
+        days = int(message.text)
+        if days <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи положительное число дней!", reply_markup=admin_cancel_keyboard())
+    await state.update_data(promo_days=days)
+    await state.set_state(UserStates.waiting_promo_count)
+    await message.answer("Сколько <b>штук</b> кодов сгенерировать? (Например: 5)", reply_markup=admin_cancel_keyboard())
+
+@dp.message(UserStates.waiting_promo_count)
+async def admin_promo_count(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return await state.clear()
+    try:
+        count = int(message.text)
+        if count <= 0 or count > 100: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи число от 1 до 100!", reply_markup=admin_cancel_keyboard())
+    data = await state.get_data()
+    days = data.get("promo_days")
+    await state.clear()
+
+    codes = []
+    for _ in range(count):
+        code = f"ANON-{secrets.token_urlsafe(4).upper()}"
+        await db_execute("INSERT OR IGNORE INTO promo_codes(code, days) VALUES (?, ?)", (code, days))
+        codes.append(code)
+
+    text = f"🎁 <b>Сгенерировано {count} кодов на {days} дн.:</b>\n\n"
+    text += "\n".join(f"<code>{c}</code>" for c in codes)
+    text += "\n\n<i>Отправь их пользователям. Активация: /redeem КОД</i>"
+    await message.answer(text, reply_markup=admin_keyboard())
+
+@dp.message(Command("redeem"))
+async def user_redeem_promo(message: Message):
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        return await message.answer("Формат: <code>/redeem ТВОЙ_КОД</code>")
+    code = parts[1].upper()
+    row = await db_execute("SELECT days, used FROM promo_codes WHERE code=?", (code,), fetchone=True, commit=False)
+    if not row:
+        return await message.answer("❌ Промокод не найден.")
+    if row["used"] == 1:
+        return await message.answer("❌ Этот промокод уже был использован.")
+    user = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True, commit=False)
+    now = datetime.now(timezone.utc)
+    base = now
+    if user and user["paid_until"]:
+        try:
+            old = datetime.fromisoformat(user["paid_until"])
+            if old.tzinfo is None: old = old.replace(tzinfo=timezone.utc)
+            if old > now: base = old
+        except Exception: pass
+    until_iso = (base + timedelta(days=row["days"])).isoformat()
+    await db_execute("UPDATE users SET paid_until=? WHERE user_id=?", (until_iso, message.from_user.id))
+    await db_execute("UPDATE promo_codes SET used=1, used_by=? WHERE code=?", (message.from_user.id, code))
+    await message.answer(f"🎉 <b>Промокод активирован!</b>\n\n💎 Премиум-доступ продлен до: <b>{format_msk(until_iso)}</b>", reply_markup=main_keyboard())
 
 async def main():
     global BOT_USERNAME
