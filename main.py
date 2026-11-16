@@ -47,7 +47,6 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "3000"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
 
-# Бот ищет картинку по этим путям
 BANNER_CANDIDATES = [
     "banner.jpg", "banner.jpeg", "banner.png",
     "/app/banner.jpg", "/app/banner.jpeg", "/app/banner.png",
@@ -415,7 +414,16 @@ async def send_tariffs_view(message: Message):
         try:
             await message.answer_photo(photo=FSInputFile(banner_file), caption=caption, reply_markup=prices_keyboard())
             return
-        except Exception: pass
+        except TelegramBadRequest as e:
+            logging.error(f"Ошибка отправки фото (пробуем документ): {e}")
+            try:
+                await message.answer_document(document=FSInputFile(banner_file), caption=caption, reply_markup=prices_keyboard())
+                return
+            except Exception as e2:
+                logging.error(f"Ошибка отправки документа: {e2}")
+        except Exception as e:
+            logging.error(f"Неизвестная ошибка фото: {e}")
+    
     await message.answer(caption, reply_markup=prices_keyboard())
 
 @dp.callback_query(F.data == "prices")
