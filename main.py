@@ -195,9 +195,6 @@ def sent_message_keyboard(receiver_id: int, message_id: int):
         [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back")]
     ])
 
-def blocked_user_keyboard(sender_id):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"unblock:{sender_id}")]])
-
 def prices_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -383,10 +380,7 @@ async def build_profile_stats(user_id: int) -> str:
     t_visits = tv["n"] if tv else 0
     a_visits = av["n"] if av else 0
     
-    # Улучшенная логика популярности (чтобы не было резкого перехода от 0 к 10)
-    # Сегодня: каждое сообщение дает +1, максимум 10
     today_level = min(10, tc)
-    # Все время: каждые 10 сообщений дают +1, максимум 10 (нужно 100 сообщений для 10/10)
     total_level = min(10, ac // 10)
 
     code = await get_or_create_link_code(user_id)
@@ -402,10 +396,8 @@ async def build_profile_stats(user_id: int) -> str:
                 sub_text = f"✅ <b>Активна</b> до {format_msk(user['paid_until'])}"
         except Exception: pass
 
-    # Красивый и структурированный дизайн
     return (
         "📊 <b>СТАТИСТИКА ПРОФИЛЯ</b>\n\n"
-        
         "📅 <b>За сегодня:</b>\n"
         f"├ 💬 Сообщений: <b>{tc}</b>\n"
         f"├ 🔗 Переходов: <b>{t_visits}</b>\n"
@@ -456,29 +448,61 @@ async def help_cb(call: CallbackQuery):
 @dp.callback_query(F.data == "my_blocked")
 async def my_blocked(call: CallbackQuery):
     blocked = await get_my_blocked_users(call.from_user.id)
+    
     if not blocked:
-        msg_text = "🚫 <b>БЛОК-ЛИСТ</b>\n\n✅ Список пуст."
+        text = (
+            "🚫 <b>БЛОК-ЛИСТ</b>\n\n"
+            "✅ <i>Список пуст. Вы никого не блокировали.</i>"
+        )
         if call.message.photo:
             try: await call.message.delete()
             except Exception: pass
-            await call.message.answer(msg_text, reply_markup=back_keyboard())
-        else: await safe_edit_text(call, msg_text, reply_markup=back_keyboard())
+            await call.message.answer(text, reply_markup=back_keyboard())
+        else: 
+            await safe_edit_text(call, text, reply_markup=back_keyboard())
         return await call.answer()
-    await call.message.answer(f"🚫 <b>БЛОК-ЛИСТ</b>\n\nЗаблокировано: <b>{len(blocked)}</b>")
+
+    text = f"🚫 <b>БЛОК-ЛИСТ</b>\n\n<i>Заблокировано пользователей: {len(blocked)}</i>\n\n"
+    
+    keyboard = []
     for user in blocked:
         name = html.escape(user["first_name"] or "Без имени")
         username = f"@{html.escape(user['username'])}" if user["username"] else "без username"
-        await call.message.answer(f"👤 <b>{name}</b> ({username})", reply_markup=blocked_user_keyboard(user["user_id"]))
+        text += f"👤 <b>{name}</b> ({username})\n"
+        
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"✅ Разблокировать {name}", 
+                callback_data=f"unblock:{user['user_id']}"
+            )
+        ])
+        
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back")])
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    if call.message.photo:
+        try: await call.message.delete()
+        except Exception: pass
+        await call.message.answer(text, reply_markup=reply_markup)
+    else: 
+        await safe_edit_text(call, text, reply_markup=reply_markup)
+    
     await call.answer()
 
 @dp.callback_query(F.data.startswith("unblock:"))
 async def unblock_from_list(call: CallbackQuery):
-    try: sender_id = int(call.data.split(":", 1)[1])
-    except ValueError: return await call.answer("Ошибка.", show_alert=True)
-    if not await is_blocked(call.from_user.id, sender_id): return await call.answer("Уже разблокирован.", show_alert=True)
+    try: 
+        sender_id = int(call.data.split(":", 1)[1])
+    except ValueError: 
+        return await call.answer("Ошибка.", show_alert=True)
+    
+    if not await is_blocked(call.from_user.id, sender_id): 
+        return await call.answer("Уже разблокирован.", show_alert=True)
+    
     await db_execute("DELETE FROM blocks WHERE receiver_id=? AND sender_id=?", (call.from_user.id, sender_id))
-    await safe_edit_text(call, f"✅ Пользователь <code>{sender_id}</code> разблокирован.", reply_markup=back_keyboard())
-    await call.answer("Разблокирован!")
+    await call.answer("✅ Пользователь разблокирован!")
+    
+    await my_blocked(call)
 
 @dp.callback_query(F.data.startswith("block:"))
 async def block_author(call: CallbackQuery):
