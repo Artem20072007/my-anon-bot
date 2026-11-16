@@ -168,7 +168,8 @@ def main_keyboard():
 def link_keyboard(link: str):
     share_url = f"https://t.me/share/url?url={link}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)],
+        [InlineKeyboardButton(text="📋 Скопировать ссылку", copy_text=link)],
+        [InlineKeyboardButton(text="📤 Поделиться", url=share_url)],
         [InlineKeyboardButton(text="⚙️ Открыть меню", callback_data="open_menu")]
     ])
 
@@ -176,6 +177,13 @@ def message_keyboard(message_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨ Узнать автора", callback_data=f"who:{message_id}")],
         [InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"block:{message_id}")],
+    ])
+
+# Клавиатура без кнопки удаления
+def sent_message_keyboard(receiver_id: int, message_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✉️ Отправить ещё одно", callback_data=f"send_again:{receiver_id}")],
+        [InlineKeyboardButton(text="🏠 В главное меню", callback_data="back")]
     ])
 
 def blocked_user_keyboard(sender_id):
@@ -221,9 +229,9 @@ def build_link_text(username: str, code: str) -> str:
     link = f"https://t.me/{username}?start={code}"
     return (
         "👀 <b>Начни получать анонимные вопросы прямо сейчас!</b>\n\n"
-        "🔗 <b>Твоя ссылка:</b>\n"
-        f"<code>{link}</code>\n\n"
-        "Размести её в профиле или сторис — и жди вопросы."
+        "🔗 <b>Ссылка для получения анонимных вопросов:</b>\n"
+        f"<blockquote><code>{link}</code></blockquote>\n\n"
+        "Размести эту ссылку 👇 в описании профиля 📱 / 🎵 / 📸, чтобы тебе могли написать."
     )
 
 @dp.message(CommandStart())
@@ -257,7 +265,8 @@ async def open_menu(call: CallbackQuery):
     await call.answer()
 
 @dp.callback_query(F.data == "back")
-async def back(call: CallbackQuery):
+async def back(call: CallbackQuery, state: FSMContext):
+    await state.clear()
     text = "📱 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыбери действие:"
     if call.message.photo:
         try: await call.message.delete()
@@ -298,19 +307,26 @@ async def receive_question(message: Message, state: FSMContext):
     if await is_blocked(receiver_id, sender_id):
         await state.clear()
         return await message.answer("🚫 Этот пользователь заблокировал приём сообщений от тебя.")
+    
     count = await db_execute("SELECT COUNT(*) AS count FROM messages WHERE sender_id=? AND receiver_id=? AND created_at>?", (sender_id, receiver_id, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()), fetchone=True, commit=False)
     if count and count["count"] >= RATE_LIMIT:
         await state.clear()
         return await message.answer("⚠️ Превышен лимит сообщений в час.")
+    
     text = message.text or message.caption or ""
     now = datetime.now(timezone.utc).isoformat()
     row = await db_execute("INSERT INTO messages (sender_id, receiver_id, text, telegram_message_id, created_at) VALUES (?, ?, ?, ?, ?) RETURNING id", (sender_id, receiver_id, text, message.message_id, now), fetchone=True)
     message_id = row["id"]
     await state.clear()
-    await message.answer("✅ <b>Сообщение успешно отправлено анонимно!</b>")
+    
+    await message.answer(
+        "✅ <b>Сообщение отправлено, ожидайте ответ!</b>\n\n"
+        f"<blockquote>{html.escape(text) if text else '[Медиа-файл]'}</blockquote>",
+        reply_markup=sent_message_keyboard(receiver_id, message_id)
+    )
+    
     try:
         header = "💌 <b>У тебя новое анонимное сообщение!</b>\n\n"
-        # ИЗМЕНЕННЫЙ ТЕКСТ:
         footer = "\n\n↩️ <i>Свайпни для ответа.</i>"
         
         if message.content_type == "text":
@@ -320,10 +336,19 @@ async def receive_question(message: Message, state: FSMContext):
             caption_text = message.caption or ""
             body = f"<blockquote>{html.escape(caption_text)}</blockquote>" if caption_text else ""
             sent = await bot.copy_message(chat_id=receiver_id, from_chat_id=message.chat.id, message_id=message.message_id, caption=header + body + footer, parse_mode=ParseMode.HTML, reply_markup=message_keyboard(message_id))
+        
         await db_execute("UPDATE messages SET recipient_message_id=? WHERE id=?", (sent.message_id, message_id))
     except Exception:
         logging.error("Ошибка доставки", exc_info=True)
         await message.answer("⚠️ Не удалось доставить сообщение.")
+
+@dp.callback_query(F.data.startswith("send_again:"))
+async def send_again_cb(call: CallbackQuery, state: FSMContext):
+    receiver_id = int(call.data.split(":")[1])
+    await state.set_state(UserStates.waiting_question)
+    await state.update_data(receiver_id=receiver_id)
+    await call.message.edit_text("✍️ <b>Напиши следующее анонимное сообщение:</b>\n\n🔒 <i>Твой профиль скрыт.</i>")
+    await call.answer()
 
 @dp.message(F.reply_to_message)
 async def swipe_reply(message: Message):
@@ -505,6 +530,7 @@ async def buy_receive_email(message: Message, state: FSMContext):
 async def activate_payment(payment_id: str):
     row = await db_execute("SELECT * FROM payments WHERE telegram_charge_id=?", (payment_id,), fetchone=True, commit=False)
     if not row or row["status"] == "succeeded": return False
+
     plan = PLANS.get(row["plan"])
     if not plan: return False
     user = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (row["user_id"],), fetchone=True, commit=False)
@@ -530,8 +556,11 @@ async def manual_check_payment(call: CallbackQuery):
     try:
         payment = await asyncio.to_thread(Payment.find_one, payment_id)
         if payment.status == "succeeded":
-            await activate_payment(payment_id)
-            await safe_edit_text(call, "🎉 <b>ОПЛАТА ПОДТВЕРЖДЕНА</b>\n\nПремиум-подписка активирована.", reply_markup=main_keyboard())
+            success = await activate_payment(payment_id)
+            if success:
+                await safe_edit_text(call, "🎉 <b>ОПЛАТА ПОДТВЕРЖДЕНА</b>\n\nВсе готово!", reply_markup=main_keyboard())
+            else:
+                await call.answer("Оплата уже была обработана.", show_alert=True)
         elif payment.status == "pending": await call.answer("Платёж ещё обрабатывается. Подожди 10-15 секунд.", show_alert=True)
         elif payment.status == "canceled": await call.answer("Платёж был отменён.", show_alert=True)
         else: await call.answer(f"Статус: {payment.status}", show_alert=True)
