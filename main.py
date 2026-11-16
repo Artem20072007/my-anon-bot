@@ -26,18 +26,31 @@ from aiogram.types import (
     Message,
 )
 from dotenv import load_dotenv
-from yookassa import Configuration, Payment
+
+# Пытаемся импортировать ЮKassa, но не падаем, если её нет
+try:
+    from yookassa import Configuration, Payment
+    YOOKASSA_AVAILABLE = True
+except ImportError:
+    YOOKASSA_AVAILABLE = False
+    print("⚠️ ВНИМАНИЕ: Библиотека yookassa не установлена. Оплата не будет работать.")
 
 load_dotenv()
 
+# Настройка логирования в консоль и файл
 logging.basicConfig(
-    filename="bot_errors.log",
-    level=logging.ERROR,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    encoding="utf-8",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot_errors.log", encoding="utf-8")
+    ]
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("❌ В переменных (.env) не указан BOT_TOKEN!")
+
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 DB_FILE = os.getenv("DB_FILE", "/app/data/new_bot.sqlite3")
 RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_HOUR", "30"))
@@ -47,20 +60,18 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "3000"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
 
+if YOOKASSA_AVAILABLE and YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY:
+    Configuration.account_id = YOOKASSA_SHOP_ID
+    Configuration.secret_key = YOOKASSA_SECRET_KEY
+else:
+    print("⚠️ ЮKassa не настроена (нет ключей в .env). Оплата будет недоступна.")
+
 BANNER_CANDIDATES = [
     "banner.jpg", "banner.jpeg", "banner.png",
     "/app/banner.jpg", "/app/banner.jpeg", "/app/banner.png",
     "/app/data/banner.jpg", "/app/data/banner.jpeg", "/app/data/banner.png"
 ]
 MSK_TZ = timezone(timedelta(hours=3))
-
-if not BOT_TOKEN:
-    raise RuntimeError("В переменных не указан BOT_TOKEN")
-if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
-    raise RuntimeError("В переменных не указаны YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY")
-
-Configuration.account_id = YOOKASSA_SHOP_ID
-Configuration.secret_key = YOOKASSA_SECRET_KEY
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -235,6 +246,7 @@ def build_link_text(username: str, code: str) -> str:
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
+    print(f"✅ /start от {message.from_user.id}")
     if message.chat.type != "private": return
     await save_user(message.from_user)
     await state.clear()
@@ -493,6 +505,9 @@ async def who_author(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def buy_start(call: CallbackQuery, state: FSMContext):
+    if not YOOKASSA_AVAILABLE:
+        return await call.answer("Оплата временно недоступна.", show_alert=True)
+    
     key = call.data.split(":")[1]
     plan = PLANS.get(key)
     if not plan: return await call.answer("Тариф не найден.", show_alert=True)
@@ -503,6 +518,10 @@ async def buy_start(call: CallbackQuery, state: FSMContext):
 
 @dp.message(UserStates.waiting_email)
 async def buy_receive_email(message: Message, state: FSMContext):
+    if not YOOKASSA_AVAILABLE:
+        await state.clear()
+        return await message.answer("Оплата недоступна.")
+        
     email = (message.text or "").strip()
     if len(email) > 254 or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+", email):
         return await message.answer("❌ Неверный формат почты! Напиши корректный email, например: <code>name@mail.ru</code>")
@@ -550,6 +569,8 @@ async def activate_payment(payment_id: str):
 
 @dp.callback_query(F.data.startswith("check_pay:"))
 async def manual_check_payment(call: CallbackQuery):
+    if not YOOKASSA_AVAILABLE:
+        return await call.answer("Оплата недоступна.", show_alert=True)
     payment_id = call.data.split(":", 1)[1]
     await call.answer("Проверяем статус...")
     try:
@@ -566,6 +587,7 @@ async def manual_check_payment(call: CallbackQuery):
     except Exception: await call.answer("Ошибка связи с ЮKassa.", show_alert=True)
 
 async def yookassa_webhook(request: web.Request):
+    if not YOOKASSA_AVAILABLE: return web.json_response({"ok": True})
     try:
         data = await request.json()
         if data.get("event") != "payment.succeeded": return web.json_response({"ok": True})
@@ -939,20 +961,22 @@ async def main():
     await init_db()
     me = await bot.get_me()
     BOT_USERNAME = me.username
+    print(f"🚀 Бот @{BOT_USERNAME} запущен и слушает сообщения!")
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_my_commands([
         BotCommand(command="start", description="Главное меню / Ссылка"),
         BotCommand(command="stats", description="Статистика профиля"),
         BotCommand(command="help", description="Инструкция"),
     ])
+    
     app = web.Application()
     app.router.add_post("/yookassa/webhook", yookassa_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, WEBHOOK_HOST, WEBHOOK_PORT)
     await site.start()
-    print(f"🚀 Бот @{BOT_USERNAME} успешно запущен!")
-    print(f"🌐 Webhook слушает порт {WEBHOOK_PORT}")
+    
     try:
         await dp.start_polling(bot)
     finally:
