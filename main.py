@@ -377,21 +377,52 @@ async def build_profile_stats(user_id: int) -> str:
     am = await db_execute("SELECT COUNT(*) AS n FROM messages WHERE receiver_id=?", (user_id,), fetchone=True, commit=False)
     tv = await db_execute("SELECT COUNT(*) AS n FROM link_visits WHERE receiver_id=? AND created_at>=?", (user_id, day_start), fetchone=True, commit=False)
     av = await db_execute("SELECT COUNT(*) AS n FROM link_visits WHERE receiver_id=?", (user_id,), fetchone=True, commit=False)
+    
     tc = tm["n"] if tm else 0
     ac = am["n"] if am else 0
+    t_visits = tv["n"] if tv else 0
+    a_visits = av["n"] if av else 0
+    
+    # Улучшенная логика популярности (чтобы не было резкого перехода от 0 к 10)
+    # Сегодня: каждое сообщение дает +1, максимум 10
+    today_level = min(10, tc)
+    # Все время: каждые 10 сообщений дают +1, максимум 10 (нужно 100 сообщений для 10/10)
+    total_level = min(10, ac // 10)
+
     code = await get_or_create_link_code(user_id)
     link = f"https://t.me/{BOT_USERNAME}?start={code}"
+    
     user = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (user_id,), fetchone=True, commit=False)
-    sub = "❌ Не активна"
+    sub_text = "❌ <i>Не активна</i>"
     if user and user["paid_until"]:
         try:
             dt = datetime.fromisoformat(user["paid_until"])
             if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-            if dt > datetime.now(timezone.utc): sub = f"✅ до {format_msk(user['paid_until'])}"
+            if dt > datetime.now(timezone.utc): 
+                sub_text = f"✅ <b>Активна</b> до {format_msk(user['paid_until'])}"
         except Exception: pass
-    t_visits = tv["n"] if tv else 0
-    a_visits = av["n"] if av else 0
-    return f"📊 <b>СТАТИСТИКА ПРОФИЛЯ</b>\n\n📅 <b>За сегодня:</b>\n▫️ Сообщений: <b>{tc}</b>\n▫️ Переходов: <b>{t_visits}</b>\n▫️ Популярность: <b>{min(10, tc // 5)}/10</b>\n\n🌐 <b>За всё время:</b>\n▫️ Сообщений: <b>{ac}</b>\n▫️ Переходов: <b>{a_visits}</b>\n▫️ Уровень: <b>{min(10, ac // 5)}/10</b>\n\n💎 <b>Премиум:</b> {sub}\n\n🔗 <b>Ссылка:</b>\n<code>{link}</code>\n<i>(нажми, чтобы скопировать)</i>"
+
+    # Красивый и структурированный дизайн
+    return (
+        "📊 <b>СТАТИСТИКА ПРОФИЛЯ</b>\n\n"
+        
+        "📅 <b>За сегодня:</b>\n"
+        f"├ 💬 Сообщений: <b>{tc}</b>\n"
+        f"├ 🔗 Переходов: <b>{t_visits}</b>\n"
+        f"└ 🔥 Популярность: <b>{today_level}/10</b>\n\n"
+        
+        "🌐 <b>За всё время:</b>\n"
+        f"├ 💬 Сообщений: <b>{ac}</b>\n"
+        f"├ 🔗 Переходов: <b>{a_visits}</b>\n"
+        f"└ 🏆 Уровень: <b>{total_level}/10</b>\n\n"
+        
+        "💎 <b>Премиум-доступ:</b>\n"
+        f"└ {sub_text}\n\n"
+        
+        "🔗 <b>Твоя ссылка:</b>\n"
+        f"<blockquote><code>{link}</code></blockquote>\n"
+        "<i>(нажми, чтобы скопировать)</i>"
+    )
 
 @dp.callback_query(F.data == "profile_stats")
 async def profile_stats_cb(call: CallbackQuery):
