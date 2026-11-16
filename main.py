@@ -181,12 +181,19 @@ def message_keyboard(message_id: int):
 def blocked_user_keyboard(sender_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"unblock:{sender_id}")]])
 
+# КРАСИВОЕ МЕНЮ ТАРИФОВ
 def prices_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗓 1 ДЕНЬ — 99 ₽", callback_data="buy:1d")],
-        [InlineKeyboardButton(text="🗓 7 ДНЕЙ — 299 ₽", callback_data="buy:7d")],
-        [InlineKeyboardButton(text="👑 30 ДНЕЙ — 799 ₽", callback_data="buy:30d")],
-        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back")],
+        [
+            InlineKeyboardButton(text="🗓 1 ДЕНЬ — 99 ₽", callback_data="buy:1d"),
+            InlineKeyboardButton(text="🔥 7 ДНЕЙ — 299 ₽", callback_data="buy:7d")
+        ],
+        [
+            InlineKeyboardButton(text="👑 30 ДНЕЙ — 799 ₽", callback_data="buy:30d")
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back")
+        ],
     ])
 
 def back_keyboard():
@@ -408,7 +415,7 @@ async def block_author(call: CallbackQuery):
     await call.answer("🚫 Автор заблокирован!", show_alert=True)
 
 async def send_tariffs_view(message: Message):
-    caption = "👑 <b>ВЫБЕРИ СВОЙ ТАРИФ:</b>"
+    caption = "👑 <b>ВЫБЕРИ СВОЙ ТАРИФ:</b>\n\n🔥 <i>Узнай, кто тебе пишет, и отвечай анонимно!</i>"
     banner_file = find_existing_banner()
     if banner_file:
         try:
