@@ -310,7 +310,9 @@ async def receive_question(message: Message, state: FSMContext):
     await message.answer("✅ <b>Сообщение успешно отправлено анонимно!</b>")
     try:
         header = "💌 <b>У тебя новое анонимное сообщение!</b>\n\n"
-        footer = "\n\n↩️ <i>Сделай свайп (ответ) на это сообщение, чтобы ответить анонимно.</i>"
+        # ИЗМЕНЕННЫЙ ТЕКСТ:
+        footer = "\n\n↩️ <i>Свайпни для ответа.</i>"
+        
         if message.content_type == "text":
             body = f"<blockquote>{html.escape(message.text or '')}</blockquote>"
             sent = await bot.send_message(receiver_id, header + body + footer, reply_markup=message_keyboard(message_id))
@@ -374,11 +376,11 @@ async def stats_command(message: Message):
 @dp.message(Command("help"))
 async def help_command(message: Message):
     if message.chat.type == "private":
-        await message.answer("❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Моя ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🎁 <b>Есть промокод?</b> Активируй его командой:\n<code>/redeem ТВОЙ_КОД</code>\n\n🔒 <i>Анонимность гарантирована.</i>", reply_markup=back_keyboard())
+        await message.answer("❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🎁 <b>Есть промокод?</b> Активируй его командой:\n<code>/redeem ТВОЙ_КОД</code>\n\n🔒 <i>Анонимность гарантирована.</i>", reply_markup=back_keyboard())
 
 @dp.callback_query(F.data == "help")
 async def help_cb(call: CallbackQuery):
-    text = "❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Моя ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🎁 <b>Есть промокод?</b> Активируй его командой:\n<code>/redeem ТВОЙ_КОД</code>\n\n🔒 <i>Анонимность гарантирована.</i>"
+    text = "❓ <b>КАК ЭТО РАБОТАЕТ</b>\n\n1️⃣ Нажми <b>«🔗 Ссылка»</b> и скопируй её.\n2️⃣ Размести ссылку в профиле.\n3️⃣ Получай анонимные сообщения.\n4️⃣ Чтобы ответить — сделай <b>свайп (Reply)</b>.\n5️⃣ Чтобы раскрыть автора — нажми <b>«✨ Узнать автора»</b>.\n\n💎 <b>Премиум</b> открывает авторов без ограничений.\n\n🎁 <b>Есть промокод?</b> Активируй его командой:\n<code>/redeem ТВОЙ_КОД</code>\n\n🔒 <i>Анонимность гарантирована.</i>"
     if call.message.photo:
         try: await call.message.delete()
         except Exception: pass
