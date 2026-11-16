@@ -179,7 +179,6 @@ def message_keyboard(message_id: int):
         [InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"block:{message_id}")],
     ])
 
-# Клавиатура без кнопки удаления
 def sent_message_keyboard(receiver_id: int, message_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✉️ Отправить ещё одно", callback_data=f"send_again:{receiver_id}")],
