@@ -20,6 +20,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
+    CopyTextButton,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -27,7 +28,6 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
-# Пытаемся импортировать ЮKassa, но не падаем, если её нет
 try:
     from yookassa import Configuration, Payment
     YOOKASSA_AVAILABLE = True
@@ -37,7 +37,6 @@ except ImportError:
 
 load_dotenv()
 
-# Настройка логирования в консоль и файл
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -179,7 +178,7 @@ def main_keyboard():
 def link_keyboard(link: str):
     share_url = f"https://t.me/share/url?url={link}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", copy_text=link)],
+        [InlineKeyboardButton(text="📋 Скопировать ссылку", copy_text=CopyTextButton(text=link))],
         [InlineKeyboardButton(text="📤 Поделиться", url=share_url)],
         [InlineKeyboardButton(text="⚙️ Открыть меню", callback_data="open_menu")]
     ])
@@ -246,7 +245,6 @@ def build_link_text(username: str, code: str) -> str:
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
-    print(f"✅ /start от {message.from_user.id}")
     if message.chat.type != "private": return
     await save_user(message.from_user)
     await state.clear()
