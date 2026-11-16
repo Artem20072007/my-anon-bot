@@ -47,7 +47,12 @@ WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "3000"))
 RETURN_URL = os.getenv("RETURN_URL", "https://t.me/").strip()
 
-BANNER_CANDIDATES = ["banner.png", "banner.jpg", "banner.jpeg", "/app/banner.png", "/app/banner.jpg", "/app/data/banner.png", "/app/data/banner.jpg"]
+# Бот ищет картинку по этим путям
+BANNER_CANDIDATES = [
+    "banner.jpg", "banner.jpeg", "banner.png",
+    "/app/banner.jpg", "/app/banner.jpeg", "/app/banner.png",
+    "/app/data/banner.jpg", "/app/data/banner.jpeg", "/app/data/banner.png"
+]
 MSK_TZ = timezone(timedelta(hours=3))
 
 if not BOT_TOKEN:
@@ -162,10 +167,10 @@ def main_keyboard():
     ])
 
 def link_keyboard(link: str):
-    share_url = f"https://t.me/share/url?url={link}&text=%D0%9D%D0%B0%D0%BF%D0%B8%D1%88%D0%B8%20%D0%BC%D0%BD%D0%B5%20%D1%87%D1%82%D0%BE-%D0%BD%D0%B8%D0%B1%D1%83%D0%B4%D1%8C%20%D0%B0%D0%BD%D0%BE%D0%BD%D0%B8%D0%BC%D0%BD%D0%BE%20%F0%9F%A4%AB"
+    share_url = f"https://t.me/share/url?url={link}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)],
-        [InlineKeyboardButton(text="📱 Открыть меню", callback_data="open_menu")]
+        [InlineKeyboardButton(text="⚙️ Открыть меню", callback_data="open_menu")]
     ])
 
 def message_keyboard(message_id: int):
@@ -193,7 +198,7 @@ def admin_keyboard():
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"), InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_chart")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users"), InlineKeyboardButton(text="🎯 Снайперы", callback_data="admin_snipers")],
         [InlineKeyboardButton(text="💰 Топ донатеров", callback_data="admin_top_donors"), InlineKeyboardButton(text="💎 Подписки", callback_data="admin_subs")],
-        [InlineKeyboardButton(text="👑 С подпиской", callback_data="admin_active_subs")], # <--- НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="👑 С подпиской", callback_data="admin_active_subs")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"), InlineKeyboardButton(text="📥 Скачать БД", callback_data="admin_backup")],
     ])
 
@@ -209,7 +214,12 @@ def admin_cancel_keyboard():
 
 def build_link_text(username: str, code: str) -> str:
     link = f"https://t.me/{username}?start={code}"
-    return f"Начни получать анонимные вопросы прямо сейчас 👀\n\n🔗 <b>Ссылка для получения анонимных вопросов:</b>\n<code>{link}</code>\n\nРазмести эту ссылку 👇 в описании профиля 📱 / 🎵 / 📸, чтобы тебе могли написать."
+    return (
+        "👀 <b>Начни получать анонимные вопросы прямо сейчас!</b>\n\n"
+        "🔗 <b>Твоя ссылка:</b>\n"
+        f"<code>{link}</code>\n\n"
+        "Размести её в профиле или сторис — и жди вопросы."
+    )
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
@@ -233,7 +243,6 @@ async def start(message: Message, state: FSMContext):
     text = build_link_text(BOT_USERNAME, code)
     link = f"https://t.me/{BOT_USERNAME}?start={code}"
     await message.answer(text, reply_markup=link_keyboard(link))
-    await message.answer("📱 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыбери, что тебя интересует:", reply_markup=main_keyboard())
 
 @dp.callback_query(F.data == "open_menu")
 async def open_menu(call: CallbackQuery):
@@ -600,29 +609,18 @@ async def admin_users(call: CallbackQuery):
     else: await safe_edit_text(call, text, reply_markup=admin_keyboard())
     await call.answer()
 
-# --- НОВАЯ ФУНКЦИЯ: СПИСОК С ПОДПИСКОЙ ---
 @dp.callback_query(F.data == "admin_active_subs")
 async def admin_active_subs(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
-    
     now_iso = datetime.now(timezone.utc).isoformat()
-    rows = await db_execute(
-        "SELECT user_id, username, first_name, paid_until FROM users WHERE paid_until IS NOT NULL AND paid_until > ? ORDER BY paid_until DESC LIMIT 30",
-        (now_iso,), fetchall=True, commit=False
-    )
-    
-    if not rows:
-        text = "👑 <b>АКТИВНЫЕ ПОДПИСКИ</b>\n\n😔 Пока ни у кого нет активной подписки."
+    rows = await db_execute("SELECT user_id, username, first_name, paid_until FROM users WHERE paid_until IS NOT NULL AND paid_until > ? ORDER BY paid_until DESC LIMIT 30", (now_iso,), fetchall=True, commit=False)
+    if not rows: text = "👑 <b>АКТИВНЫЕ ПОДПИСКИ</b>\n\n😔 Пока ни у кого нет активной подписки."
     else:
         text = f"👑 <b>АКТИВНЫЕ ПОДПИСКИ</b> (всего: {len(rows)})\n\n"
         for r in rows:
             name = html.escape(r["first_name"] or "—")
             uname = f"@{html.escape(r['username'])}" if r["username"] else "—"
-            expire_date = format_msk(r["paid_until"])
-            text += f"👤 <b>{name}</b> ({uname})\n"
-            text += f"   🆔 ID: <code>{r['user_id']}</code>\n"
-            text += f"   📅 До: <b>{expire_date}</b>\n\n"
-            
+            text += f"👤 <b>{name}</b> ({uname})\n   🆔 ID: <code>{r['user_id']}</code>\n   📅 До: <b>{format_msk(r['paid_until'])}</b>\n\n"
     if call.message.photo:
         try: await call.message.delete()
         except Exception: pass
