@@ -160,9 +160,9 @@ async def safe_edit_text(call: CallbackQuery, text: str, reply_markup=None):
 
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Моя ссылка", callback_data="my_link"), InlineKeyboardButton(text="📊 Статистика", callback_data="profile_stats")],
+        [InlineKeyboardButton(text="🔗 Ссылка", callback_data="my_link"), InlineKeyboardButton(text="📊 Статистика", callback_data="profile_stats")],
         [InlineKeyboardButton(text="💎 Премиум", callback_data="prices"), InlineKeyboardButton(text="🚫 Блок-лист", callback_data="my_blocked")],
-        [InlineKeyboardButton(text="❓ Помощь", callback_data="help")],
+        [InlineKeyboardButton(text="👑 Моя подписка", callback_data="my_sub"), InlineKeyboardButton(text="❓ Помощь", callback_data="help")],
     ])
 
 def link_keyboard(link: str):
@@ -181,7 +181,6 @@ def message_keyboard(message_id: int):
 def blocked_user_keyboard(sender_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"unblock:{sender_id}")]])
 
-# КРАСИВОЕ МЕНЮ ТАРИФОВ
 def prices_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -254,12 +253,12 @@ async def start(message: Message, state: FSMContext):
 async def open_menu(call: CallbackQuery):
     try: await call.message.delete()
     except Exception: pass
-    await call.message.answer("📱 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыбери, что тебя интересует:", reply_markup=main_keyboard())
+    await call.message.answer("📱 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыбери действие:", reply_markup=main_keyboard())
     await call.answer()
 
 @dp.callback_query(F.data == "back")
 async def back(call: CallbackQuery):
-    text = "📱 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыбери, что тебя интересует:"
+    text = "📱 <b>ГЛАВНОЕ МЕНЮ</b>\n\nВыбери действие:"
     if call.message.photo:
         try: await call.message.delete()
         except Exception: pass
@@ -277,6 +276,15 @@ async def my_link(call: CallbackQuery):
         except Exception: pass
         await call.message.answer(text, reply_markup=link_keyboard(link))
     else: await safe_edit_text(call, text, reply_markup=link_keyboard(link))
+    await call.answer()
+
+@dp.callback_query(F.data == "my_sub")
+async def my_sub_cb(call: CallbackQuery):
+    if await user_is_paid(call.from_user.id):
+        user = await db_execute("SELECT paid_until FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True, commit=False)
+        await call.message.answer(f"💎 Ваша подписка активна до: <b>{format_msk(user['paid_until'])}</b>", reply_markup=back_keyboard())
+    else:
+        await call.message.answer("❌ У вас нет активной подписки. Купите её в разделе «💎 Премиум».", reply_markup=back_keyboard())
     await call.answer()
 
 @dp.message(UserStates.waiting_question)
